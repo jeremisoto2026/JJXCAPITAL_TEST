@@ -54,27 +54,20 @@ app.post("/save", async (req, res) => {
   }
 });
 
-// Ruta test Binance (saldo spot con logs y ping previo)
-app.get("/balance", async (req, res) => {
+// Ruta test Binance (saldo spot con logs)
+app.get("/balance", (req, res) => {
   console.log("➡️ Entrando a /balance...");
+  console.log("🔑 APIKEY:", process.env.BINANCE_API_KEY ? "Cargada ✅" : "NO cargada ❌");
+  console.log("🔑 APISECRET:", process.env.BINANCE_API_SECRET ? "Cargada ✅" : "NO cargada ❌");
 
-  try {
-    // 🔹 Ping primero para confirmar conexión con Binance
-    const ping = await client.futuresPing();
-    console.log("✅ Binance respondió al ping:", ping);
-
-    client.balance((error, balances) => {
-      if (error) {
-        console.error("❌ Error Binance:", error);
-        return res.status(500).json({ error: error.body || error.message });
-      }
-      console.log("✅ Balances Binance:", balances);
-      res.json(balances);
-    });
-  } catch (err) {
-    console.error("❌ Error general al conectar con Binance:", err.message);
-    res.status(500).json({ error: err.message });
-  }
+  client.balance((error, balances) => {
+    if (error) {
+      console.error("❌ Error Binance:", error);
+      return res.status(500).json({ error: error.body || error.message });
+    }
+    console.log("✅ Balances Binance:", balances);
+    res.json(balances);
+  });
 });
 
 // Levantar servidor
