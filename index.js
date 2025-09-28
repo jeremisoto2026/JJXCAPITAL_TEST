@@ -1,5 +1,4 @@
 import express from "express";
-import bodyParser from "body-parser";
 import cors from "cors";
 import dotenv from "dotenv";
 import { initializeApp } from "firebase/app";
@@ -9,7 +8,7 @@ import Binance from "node-binance-api";
 dotenv.config();
 const app = express();
 app.use(cors());
-app.use(bodyParser.json());
+app.use(express.json()); // ✅ Reemplaza body-parser
 
 // === Firebase ===
 const firebaseConfig = {
@@ -37,10 +36,17 @@ app.get("/ping", (req, res) => {
 // Ruta test Firebase
 app.post("/save", async (req, res) => {
   try {
+    const { mensaje } = req.body;
+
+    if (!mensaje) {
+      return res.status(400).json({ success: false, error: "El campo 'mensaje' es obligatorio" });
+    }
+
     const docRef = await addDoc(collection(db, "mensajes"), {
-      mensaje: req.body.mensaje,
+      mensaje,
       fecha: new Date()
     });
+
     res.json({ success: true, id: docRef.id });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
@@ -56,5 +62,5 @@ app.get("/balance", (req, res) => {
 });
 
 // Levantar servidor
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 8080; // ⚡ Render usa 8080
 app.listen(PORT, () => console.log(`Servidor corriendo en puerto ${PORT}`));
