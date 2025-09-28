@@ -59,7 +59,7 @@ app.post("/save", async (req, res) => {
   }
 });
 
-// === Ruta Binance Spot (saldo real) ===
+// === Ruta Binance Spot (saldo real - sin filtro) ===
 app.get("/balance", (req, res) => {
   console.log("➡️ Entrando a /balance...");
   console.log("🔑 APIKEY:", process.env.BINANCE_API_KEY ? "Cargada ✅" : "NO cargada ❌");
@@ -71,14 +71,10 @@ app.get("/balance", (req, res) => {
       return res.status(500).json({ error: error.body || error.message });
     }
 
-    console.log("✅ Binance Spot Account:", account);
+    console.log("✅ Binance Spot Account (RAW):", account);
 
-    // 🔹 Filtramos balances con fondos > 0
-    const balances = account.balances.filter(
-      b => parseFloat(b.free) > 0 || parseFloat(b.locked) > 0
-    );
-
-    res.json(balances);
+    // 🔹 Devolvemos todo el objeto completo para debug
+    res.json(account);
   });
 });
 
