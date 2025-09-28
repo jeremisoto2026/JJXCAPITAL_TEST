@@ -28,6 +28,11 @@ const client = new Binance().options({
   APISECRET: process.env.BINANCE_API_SECRET
 });
 
+// 🔹 Ruta raíz para Railway (healthcheck)
+app.get("/", (req, res) => {
+  res.send("API JJXCAPITAL 🚀 funcionando");
+});
+
 // ✅ Ruta de prueba para verificar servidor
 app.get("/ping", (req, res) => {
   res.json({ status: "Servidor activo ✅" });
@@ -69,7 +74,9 @@ app.get("/balance", (req, res) => {
     console.log("✅ Binance Spot Account:", account);
 
     // 🔹 Filtramos balances con fondos > 0
-    const balances = account.balances.filter(b => parseFloat(b.free) > 0 || parseFloat(b.locked) > 0);
+    const balances = account.balances.filter(
+      b => parseFloat(b.free) > 0 || parseFloat(b.locked) > 0
+    );
 
     res.json(balances);
   });
