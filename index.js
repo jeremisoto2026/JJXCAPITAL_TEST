@@ -23,6 +23,29 @@ const firebaseConfig = {
 const firebaseApp = initializeApp(firebaseConfig);
 const db = getFirestore(firebaseApp);
 
+// === Normalización de datos ===
+const fiatMap = {
+  USD: "USDT",   // Binance devuelve USD → lo guardamos como USDT
+  BUSD: "USDT",  // BUSD ya no existe → lo guardamos como USDT
+  FDUSD: "USDT", // FDUSD → también lo tratamos como USDT
+};
+
+function normalizeOperation(rawOp) {
+  return {
+    order_id: rawOp.order_id?.trim() || "",
+    exchange: rawOp.exchange || "Binance",
+    operation_type: rawOp.operation_type,
+    crypto: rawOp.crypto?.toUpperCase() || "",
+    fiat: fiatMap[rawOp.fiat] || rawOp.fiat,   // 🔹 normalizamos fiat
+    crypto_amount: parseFloat(rawOp.crypto_amount) || 0,
+    fiat_amount: parseFloat(rawOp.fiat_amount) || 0,
+    exchange_rate: parseFloat(rawOp.exchange_rate) || 0,
+    fee: parseFloat(rawOp.fee) || 0,
+    profit: 0, // inicializamos en 0, luego lo calculas aparte
+    timestamp: new Date()
+  };
+}
+
 // 🔹 Ruta raíz para Railway (healthcheck)
 app.get("/", (req, res) => {
   res.send("API JJXCAPITAL 🚀 funcionando");
@@ -33,7 +56,7 @@ app.get("/ping", (req, res) => {
   res.json({ status: "Servidor activo ✅" });
 });
 
-// Ruta test Firebase
+// Ruta test Firebase simple
 app.post("/save", async (req, res) => {
   try {
     const { mensaje } = req.body;
@@ -86,6 +109,28 @@ app.get("/balance", async (req, res) => {
   } catch (err) {
     console.error("❌ Error Binance axios:", err.response?.data || err.message);
     res.status(500).json({ error: err.response?.data || err.message });
+  }
+});
+
+// === Nueva ruta: guardar operación normalizada ===
+app.post("/save-operation", async (req, res) => {
+  try {
+    const rawOp = req.body;
+
+    // Validación básica
+    if (!rawOp.operation_type || !rawOp.crypto || !rawOp.fiat || !rawOp.exchange_rate) {
+      return res.status(400).json({ success: false, error: "Faltan campos obligatorios" });
+    }
+
+    const operationData = normalizeOperation(rawOp);
+
+    // Guardar en Firestore
+    const docRef = await addDoc(collection(db, "operations"), operationData);
+
+    res.json({ success: true, id: docRef.id, data: operationData });
+  } catch (err) {
+    console.error("❌ Error guardando operación:", err.message);
+    res.status(500).json({ success: false, error: err.message });
   }
 });
 
