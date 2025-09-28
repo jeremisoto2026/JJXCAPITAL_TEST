@@ -39,7 +39,9 @@ app.post("/save", async (req, res) => {
     const { mensaje } = req.body;
 
     if (!mensaje) {
-      return res.status(400).json({ success: false, error: "El campo 'mensaje' es obligatorio" });
+      return res
+        .status(400)
+        .json({ success: false, error: "El campo 'mensaje' es obligatorio" });
     }
 
     const docRef = await db.collection("mensajes").add({
@@ -82,7 +84,7 @@ app.get("/balance", async (req, res) => {
   }
 });
 
-// === Ruta para guardar operaciones ===
+// === Ruta para guardar operaciones manuales ===
 app.post("/save-operation", async (req, res) => {
   try {
     const {
@@ -98,11 +100,11 @@ app.post("/save-operation", async (req, res) => {
       profit,
     } = req.body;
 
-    // Validación rápida
     if (!exchange || !operation_type || !cryptoSymbol || !fiat || !exchange_rate) {
       return res.status(400).json({
         success: false,
-        error: "Faltan campos obligatorios: exchange, operation_type, crypto, fiat, exchange_rate",
+        error:
+          "Faltan campos obligatorios: exchange, operation_type, crypto, fiat, exchange_rate",
       });
     }
 
@@ -129,6 +131,67 @@ app.post("/save-operation", async (req, res) => {
   }
 });
 
+// === Ruta para sincronizar órdenes Spot automáticamente ===
+app.get("/sync-operations", async (req, res) => {
+  try {
+    const timestamp = Date.now();
+    const queryString = `symbol=BTCUSDT&timestamp=${timestamp}`; // 🔹 Cambia aquí el par si quieres otro
+    const signature = crypto
+      .createHmac("sha256", process.env.BINANCE_API_SECRET)
+      .update(queryString)
+      .digest("hex");
+
+    const response = await axios.get(
+      `https://api.binance.com/api/v3/allOrders?${queryString}&signature=${signature}`,
+      {
+        headers: { "X-MBX-APIKEY": process.env.BINANCE_API_KEY },
+      }
+    );
+
+    const orders = response.data;
+
+    if (!orders || orders.length === 0) {
+      return res.json({
+        success: true,
+        message: "No hay órdenes en Binance para este par.",
+      });
+    }
+
+    const batch = db.batch();
+
+    orders.forEach((order) => {
+      const ref = db.collection("operations").doc();
+
+      const operationData = {
+        order_id: order.orderId.toString(),
+        exchange: "Binance",
+        operation_type: order.side === "SELL" ? "Venta" : "Compra",
+        crypto: order.symbol.replace("USDT", ""), // Ejemplo: BTCUSDT → BTC
+        fiat: "USDT",
+        crypto_amount: parseFloat(order.executedQty),
+        fiat_amount: parseFloat(order.cummulativeQuoteQty),
+        exchange_rate:
+          parseFloat(order.cummulativeQuoteQty) /
+          (parseFloat(order.executedQty) || 1),
+        fee: 0,
+        profit: 0,
+        timestamp: new Date(order.time),
+      };
+
+      batch.set(ref, operationData);
+    });
+
+    await batch.commit();
+
+    res.json({ success: true, count: orders.length });
+  } catch (err) {
+    console.error("❌ Error en sync-operations:", err.response?.data || err.message);
+    res.status(500).json({ success: false, error: err.response?.data || err.message });
+  }
+});
+
 // === Servidor ===
 const PORT = process.env.PORT || 8080;
-app.listen(PORT, () => console.log(`Servidor corriendo en puerto ${PORT}`));
+app.listen(PORT, () =>
+  console.log(`Servidor corriendo en puerto ${PORT}`)
+);
