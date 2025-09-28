@@ -56,32 +56,6 @@ app.post("/save", async (req, res) => {
   }
 });
 
-// === Obtener balances de Binance ===
-app.get("/balance", async (req, res) => {
-  try {
-    const timestamp = Date.now();
-    const queryString = `timestamp=${timestamp}`;
-    const signature = crypto
-      .createHmac("sha256", process.env.BINANCE_API_SECRET)
-      .update(queryString)
-      .digest("hex");
-
-    const response = await axios.get(
-      `https://api.binance.com/api/v3/account?${queryString}&signature=${signature}`,
-      { headers: { "X-MBX-APIKEY": process.env.BINANCE_API_KEY } }
-    );
-
-    const balances = response.data.balances.filter(
-      (b) => parseFloat(b.free) > 0 || parseFloat(b.locked) > 0
-    );
-
-    res.json(balances);
-  } catch (err) {
-    console.error("❌ Error Binance axios:", err.response?.data || err.message);
-    res.status(500).json({ success: false, error: err.response?.data || err.message });
-  }
-});
-
 // === Guardar operación manual dentro del UID ===
 app.post("/save-operation", async (req, res) => {
   try {
@@ -122,23 +96,24 @@ app.post("/save-operation", async (req, res) => {
 });
 
 // === Sincronizar órdenes Spot automáticamente al UID ===
-app.get("/sync-operations", async (req, res) => {
+app.post("/sync-operations", async (req, res) => {
   try {
-    const { uid } = req.query;
-    if (!uid) {
-      return res.status(400).json({ success: false, error: "Falta el UID del usuario" });
+    const { uid, apiKey, apiSecret, symbol = "BTCUSDT" } = req.body;
+
+    if (!uid || !apiKey || !apiSecret) {
+      return res.status(400).json({ success: false, error: "Faltan uid, apiKey o apiSecret" });
     }
 
     const timestamp = Date.now();
-    const queryString = `symbol=BTCUSDT&timestamp=${timestamp}`;
+    const queryString = `symbol=${symbol}&timestamp=${timestamp}`;
     const signature = crypto
-      .createHmac("sha256", process.env.BINANCE_API_SECRET)
+      .createHmac("sha256", apiSecret)
       .update(queryString)
       .digest("hex");
 
     const response = await axios.get(
       `https://api.binance.com/api/v3/allOrders?${queryString}&signature=${signature}`,
-      { headers: { "X-MBX-APIKEY": process.env.BINANCE_API_KEY } }
+      { headers: { "X-MBX-APIKEY": apiKey } }
     );
 
     const orders = response.data;
@@ -151,12 +126,12 @@ app.get("/sync-operations", async (req, res) => {
     const userRef = db.collection("users").doc(uid);
 
     orders.forEach((order) => {
-      const ref = userRef.collection("operations").doc();
+      const ref = userRef.collection("operations").doc(order.orderId.toString());
       const operationData = {
         order_id: order.orderId.toString(),
         exchange: "Binance",
         operation_type: order.side === "SELL" ? "Venta" : "Compra",
-        crypto: order.symbol.replace("USDT", ""),
+        crypto: order.symbol.replace("USDT", ""), // Ejemplo: BTCUSDT → BTC
         fiat: "USDT",
         crypto_amount: parseFloat(order.executedQty),
         fiat_amount: parseFloat(order.cummulativeQuoteQty),
