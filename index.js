@@ -49,22 +49,32 @@ app.post("/save", async (req, res) => {
 
     res.json({ success: true, id: docRef.id });
   } catch (err) {
-    console.error("❌ Error Firebase:", err.message); // Log para errores Firebase
+    console.error("❌ Error Firebase:", err.message);
     res.status(500).json({ success: false, error: err.message });
   }
 });
 
-// Ruta test Binance (saldo spot con logs)
-app.get("/balance", (req, res) => {
+// Ruta test Binance (saldo spot con logs y ping previo)
+app.get("/balance", async (req, res) => {
   console.log("➡️ Entrando a /balance...");
-  client.balance((error, balances) => {
-    if (error) {
-      console.error("❌ Error Binance:", error); // Log del error
-      return res.status(500).json({ error: error.body || error.message });
-    }
-    console.log("✅ Balances Binance:", balances); // Log del resultado
-    res.json(balances);
-  });
+
+  try {
+    // 🔹 Ping primero para confirmar conexión con Binance
+    const ping = await client.futuresPing();
+    console.log("✅ Binance respondió al ping:", ping);
+
+    client.balance((error, balances) => {
+      if (error) {
+        console.error("❌ Error Binance:", error);
+        return res.status(500).json({ error: error.body || error.message });
+      }
+      console.log("✅ Balances Binance:", balances);
+      res.json(balances);
+    });
+  } catch (err) {
+    console.error("❌ Error general al conectar con Binance:", err.message);
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // Levantar servidor
