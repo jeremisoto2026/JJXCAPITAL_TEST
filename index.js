@@ -82,10 +82,14 @@ app.get("/balance", async (req, res) => {
   }
 });
 
-// === Guardar operación manual ===
+// === Guardar operación manual dentro del UID ===
 app.post("/save-operation", async (req, res) => {
   try {
-    const { order_id, exchange, operation_type, crypto: cryptoSymbol, fiat, crypto_amount, fiat_amount, exchange_rate, fee, profit } = req.body;
+    const { uid, order_id, exchange, operation_type, crypto: cryptoSymbol, fiat, crypto_amount, fiat_amount, exchange_rate, fee, profit } = req.body;
+
+    if (!uid) {
+      return res.status(400).json({ success: false, error: "Falta el UID del usuario" });
+    }
 
     if (!exchange || !operation_type || !cryptoSymbol || !fiat || !exchange_rate) {
       return res.status(400).json({
@@ -108,7 +112,7 @@ app.post("/save-operation", async (req, res) => {
       timestamp: new Date(),
     };
 
-    const docRef = await db.collection("operations").add(operationData);
+    const docRef = await db.collection("users").doc(uid).collection("operations").add(operationData);
 
     res.json({ success: true, id: docRef.id, data: operationData });
   } catch (err) {
@@ -117,9 +121,14 @@ app.post("/save-operation", async (req, res) => {
   }
 });
 
-// === Sincronizar órdenes Spot automáticamente ===
+// === Sincronizar órdenes Spot automáticamente al UID ===
 app.get("/sync-operations", async (req, res) => {
   try {
+    const { uid } = req.query;
+    if (!uid) {
+      return res.status(400).json({ success: false, error: "Falta el UID del usuario" });
+    }
+
     const timestamp = Date.now();
     const queryString = `symbol=BTCUSDT&timestamp=${timestamp}`;
     const signature = crypto
@@ -139,14 +148,15 @@ app.get("/sync-operations", async (req, res) => {
     }
 
     const batch = db.batch();
+    const userRef = db.collection("users").doc(uid);
 
     orders.forEach((order) => {
-      const ref = db.collection("operations").doc();
+      const ref = userRef.collection("operations").doc();
       const operationData = {
         order_id: order.orderId.toString(),
         exchange: "Binance",
         operation_type: order.side === "SELL" ? "Venta" : "Compra",
-        crypto: order.symbol.replace("USDT", ""), // Ejemplo: BTCUSDT → BTC
+        crypto: order.symbol.replace("USDT", ""),
         fiat: "USDT",
         crypto_amount: parseFloat(order.executedQty),
         fiat_amount: parseFloat(order.cummulativeQuoteQty),
