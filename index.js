@@ -49,18 +49,24 @@ app.post("/save", async (req, res) => {
 
     res.json({ success: true, id: docRef.id });
   } catch (err) {
+    console.error("❌ Error Firebase:", err.message); // Log para errores Firebase
     res.status(500).json({ success: false, error: err.message });
   }
 });
 
-// Ruta test Binance (saldo spot)
+// Ruta test Binance (saldo spot con logs)
 app.get("/balance", (req, res) => {
+  console.log("➡️ Entrando a /balance...");
   client.balance((error, balances) => {
-    if (error) return res.status(500).json({ error: error.body || error.message });
+    if (error) {
+      console.error("❌ Error Binance:", error); // Log del error
+      return res.status(500).json({ error: error.body || error.message });
+    }
+    console.log("✅ Balances Binance:", balances); // Log del resultado
     res.json(balances);
   });
 });
 
 // Levantar servidor
-const PORT = process.env.PORT || 8080; // ⚡ Render usa 8080
+const PORT = process.env.PORT || 8080; // ⚡ Railway usa 8080
 app.listen(PORT, () => console.log(`Servidor corriendo en puerto ${PORT}`));
