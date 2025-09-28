@@ -59,22 +59,20 @@ app.post("/save", async (req, res) => {
   }
 });
 
-// === Ruta Binance Spot (saldo real - sin filtro) ===
+// === Ruta Binance Spot (con balance()) ===
 app.get("/balance", (req, res) => {
   console.log("➡️ Entrando a /balance...");
   console.log("🔑 APIKEY:", process.env.BINANCE_API_KEY ? "Cargada ✅" : "NO cargada ❌");
   console.log("🔑 APISECRET:", process.env.BINANCE_API_SECRET ? "Cargada ✅" : "NO cargada ❌");
 
-  client.account((error, account) => {
+  client.balance((error, balances) => {
     if (error) {
-      console.error("❌ Error Binance Spot:", error);
+      console.error("❌ Error Binance (balance):", error);
       return res.status(500).json({ error: error.body || error.message });
     }
 
-    console.log("✅ Binance Spot Account (RAW):", account);
-
-    // 🔹 Devolvemos todo el objeto completo para debug
-    res.json(account);
+    console.log("✅ Binance balances recibidos");
+    res.json(balances);
   });
 });
 
