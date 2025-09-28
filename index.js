@@ -29,6 +29,11 @@ const client = new Binance().options({
   APISECRET: process.env.BINANCE_API_SECRET
 });
 
+// ✅ Ruta de prueba para verificar servidor
+app.get("/ping", (req, res) => {
+  res.json({ status: "Servidor activo ✅" });
+});
+
 // Ruta test Firebase
 app.post("/save", async (req, res) => {
   try {
