@@ -16,7 +16,7 @@ if (!admin.apps.length) {
     credential: admin.credential.cert({
       projectId: process.env.FIREBASE_PROJECT_ID,
       clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
-      privateKey: process.env.FIREBASE_PRIVATE_KEY,
+      privateKey: process.env.FIREBASE_PRIVATE_KEY, // ✅ Ya no usamos replace()
     }),
   });
 }
@@ -80,7 +80,9 @@ app.get("/balance", async (req, res) => {
     res.json(balances);
   } catch (err) {
     console.error("❌ Error Binance axios:", err.response?.data || err.message);
-    res.status(500).json({ error: err.response?.data || err.message });
+    res
+      .status(500)
+      .json({ error: err.response?.data || err.message });
   }
 });
 
@@ -186,7 +188,9 @@ app.get("/sync-operations", async (req, res) => {
     res.json({ success: true, count: orders.length });
   } catch (err) {
     console.error("❌ Error en sync-operations:", err.response?.data || err.message);
-    res.status(500).json({ success: false, error: err.response?.data || err.message });
+    res
+      .status(500)
+      .json({ success: false, error: err.response?.data || err.message });
   }
 });
 
