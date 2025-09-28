@@ -4,7 +4,7 @@ import cors from "cors";
 import dotenv from "dotenv";
 import { initializeApp } from "firebase/app";
 import { getFirestore, collection, addDoc } from "firebase/firestore";
-import Binance from "binance";
+import Binance from "node-binance-api";
 
 dotenv.config();
 const app = express();
@@ -43,15 +43,11 @@ app.post("/save", async (req, res) => {
 });
 
 // Ruta test Binance (saldo spot)
-app.get("/balance", async (req, res) => {
-  try {
-    client.balance((error, balances) => {
-      if (error) return res.status(500).json({ error: error.body });
-      res.json(balances);
-    });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+app.get("/balance", (req, res) => {
+  client.balance((error, balances) => {
+    if (error) return res.status(500).json({ error: error.body || error.message });
+    res.json(balances);
+  });
 });
 
 // Levantar servidor
