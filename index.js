@@ -1,62 +1,39 @@
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
-import { initializeApp } from "firebase/app";
-import { getFirestore, collection, addDoc } from "firebase/firestore";
+import admin from "firebase-admin";
 import axios from "axios";
 import crypto from "crypto";
 
 dotenv.config();
 const app = express();
 app.use(cors());
-app.use(express.json()); // ✅ Reemplaza body-parser
+app.use(express.json());
 
-// === Firebase ===
-const firebaseConfig = {
-  apiKey: process.env.FIREBASE_API_KEY,
-  authDomain: process.env.FIREBASE_AUTH_DOMAIN,
-  projectId: process.env.FIREBASE_PROJECT_ID,
-  storageBucket: process.env.FIREBASE_STORAGE_BUCKET,
-  messagingSenderId: process.env.FIREBASE_MESSAGING_SENDER_ID,
-  appId: process.env.FIREBASE_APP_ID
-};
-const firebaseApp = initializeApp(firebaseConfig);
-const db = getFirestore(firebaseApp);
-
-// === Normalización de datos ===
-const fiatMap = {
-  USD: "USDT",   // Binance devuelve USD → lo guardamos como USDT
-  BUSD: "USDT",  // BUSD ya no existe → lo guardamos como USDT
-  FDUSD: "USDT", // FDUSD → también lo tratamos como USDT
-};
-
-function normalizeOperation(rawOp) {
-  return {
-    order_id: rawOp.order_id?.trim() || "",
-    exchange: rawOp.exchange || "Binance",
-    operation_type: rawOp.operation_type,
-    crypto: rawOp.crypto?.toUpperCase() || "",
-    fiat: fiatMap[rawOp.fiat] || rawOp.fiat,   // 🔹 normalizamos fiat
-    crypto_amount: parseFloat(rawOp.crypto_amount) || 0,
-    fiat_amount: parseFloat(rawOp.fiat_amount) || 0,
-    exchange_rate: parseFloat(rawOp.exchange_rate) || 0,
-    fee: parseFloat(rawOp.fee) || 0,
-    profit: 0, // inicializamos en 0, luego lo calculas aparte
-    timestamp: new Date()
-  };
+// === Firebase Admin (credenciales de servicio) ===
+if (!admin.apps.length) {
+  admin.initializeApp({
+    credential: admin.credential.cert({
+      projectId: process.env.FIREBASE_PROJECT_ID,
+      clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
+      privateKey: process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, "\n"),
+    }),
+  });
 }
+
+const db = admin.firestore();
 
 // 🔹 Ruta raíz para Railway (healthcheck)
 app.get("/", (req, res) => {
-  res.send("API JJXCAPITAL 🚀 funcionando");
+  res.send("API JJXCAPITAL 🚀 funcionando con Firebase Admin");
 });
 
-// ✅ Ruta de prueba para verificar servidor
+// ✅ Ruta de prueba
 app.get("/ping", (req, res) => {
   res.json({ status: "Servidor activo ✅" });
 });
 
-// Ruta test Firebase simple
+// 🔹 Ruta test Firebase
 app.post("/save", async (req, res) => {
   try {
     const { mensaje } = req.body;
@@ -65,24 +42,20 @@ app.post("/save", async (req, res) => {
       return res.status(400).json({ success: false, error: "El campo 'mensaje' es obligatorio" });
     }
 
-    const docRef = await addDoc(collection(db, "mensajes"), {
+    const docRef = await db.collection("mensajes").add({
       mensaje,
-      fecha: new Date()
+      fecha: new Date(),
     });
 
     res.json({ success: true, id: docRef.id });
   } catch (err) {
-    console.error("❌ Error Firebase:", err.message);
+    console.error("❌ Error Firebase Admin:", err.message);
     res.status(500).json({ success: false, error: err.message });
   }
 });
 
 // === Ruta Binance Spot (axios directo) ===
 app.get("/balance", async (req, res) => {
-  console.log("➡️ Entrando a /balance...");
-  console.log("🔑 APIKEY:", process.env.BINANCE_API_KEY ? "Cargada ✅" : "NO cargada ❌");
-  console.log("🔑 APISECRET:", process.env.BINANCE_API_SECRET ? "Cargada ✅" : "NO cargada ❌");
-
   try {
     const timestamp = Date.now();
     const queryString = `timestamp=${timestamp}`;
@@ -94,15 +67,12 @@ app.get("/balance", async (req, res) => {
     const response = await axios.get(
       `https://api.binance.com/api/v3/account?${queryString}&signature=${signature}`,
       {
-        headers: { "X-MBX-APIKEY": process.env.BINANCE_API_KEY }
+        headers: { "X-MBX-APIKEY": process.env.BINANCE_API_KEY },
       }
     );
 
-    console.log("✅ Respuesta Binance recibida");
-
-    // 🔹 Filtramos balances con fondos > 0
     const balances = response.data.balances.filter(
-      b => parseFloat(b.free) > 0 || parseFloat(b.locked) > 0
+      (b) => parseFloat(b.free) > 0 || parseFloat(b.locked) > 0
     );
 
     res.json(balances);
@@ -112,20 +82,45 @@ app.get("/balance", async (req, res) => {
   }
 });
 
-// === Nueva ruta: guardar operación normalizada ===
+// === Ruta para guardar operaciones ===
 app.post("/save-operation", async (req, res) => {
   try {
-    const rawOp = req.body;
+    const {
+      order_id,
+      exchange,
+      operation_type,
+      crypto: cryptoSymbol,
+      fiat,
+      crypto_amount,
+      fiat_amount,
+      exchange_rate,
+      fee,
+      profit,
+    } = req.body;
 
-    // Validación básica
-    if (!rawOp.operation_type || !rawOp.crypto || !rawOp.fiat || !rawOp.exchange_rate) {
-      return res.status(400).json({ success: false, error: "Faltan campos obligatorios" });
+    // Validación rápida
+    if (!exchange || !operation_type || !cryptoSymbol || !fiat || !exchange_rate) {
+      return res.status(400).json({
+        success: false,
+        error: "Faltan campos obligatorios: exchange, operation_type, crypto, fiat, exchange_rate",
+      });
     }
 
-    const operationData = normalizeOperation(rawOp);
+    const operationData = {
+      order_id: order_id || "",
+      exchange,
+      operation_type,
+      crypto: cryptoSymbol,
+      fiat,
+      crypto_amount: parseFloat(crypto_amount) || 0,
+      fiat_amount: parseFloat(fiat_amount) || 0,
+      exchange_rate: parseFloat(exchange_rate),
+      fee: parseFloat(fee) || 0,
+      profit: parseFloat(profit) || 0,
+      timestamp: new Date(),
+    };
 
-    // Guardar en Firestore
-    const docRef = await addDoc(collection(db, "operations"), operationData);
+    const docRef = await db.collection("operations").add(operationData);
 
     res.json({ success: true, id: docRef.id, data: operationData });
   } catch (err) {
@@ -134,6 +129,6 @@ app.post("/save-operation", async (req, res) => {
   }
 });
 
-// Levantar servidor
-const PORT = process.env.PORT || 8080; // ⚡ Railway usa 8080
+// === Servidor ===
+const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => console.log(`Servidor corriendo en puerto ${PORT}`));
