@@ -10,19 +10,16 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// === Firebase Admin (credenciales de servicio) ===
+// === Firebase Admin con JSON completo en FIREBASE_SERVICE_ACCOUNT ===
 try {
   if (!admin.apps.length) {
+    const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+
     admin.initializeApp({
-      credential: admin.credential.cert({
-        projectId: process.env.FIREBASE_PROJECT_ID,
-        clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
-        // 🔹 La clave debe estar en una sola línea en Railway
-        privateKey: process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, "\n"),
-      }),
+      credential: admin.credential.cert(serviceAccount),
     });
   }
-  console.log("✅ Firebase Admin inicializado");
+  console.log("✅ Firebase Admin inicializado con JSON completo");
 } catch (err) {
   console.error("❌ Error inicializando Firebase Admin:", err);
 }
@@ -43,7 +40,6 @@ app.get("/ping", (req, res) => {
 app.post("/save", async (req, res) => {
   try {
     const { mensaje } = req.body;
-
     if (!mensaje) {
       return res.status(400).json({ success: false, error: "El campo 'mensaje' es obligatorio" });
     }
