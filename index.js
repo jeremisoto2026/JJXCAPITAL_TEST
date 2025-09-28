@@ -54,18 +54,23 @@ app.post("/save", async (req, res) => {
   }
 });
 
-// Ruta test Binance (saldo spot con logs)
+// === Ruta Binance Spot (saldo real) ===
 app.get("/balance", (req, res) => {
   console.log("➡️ Entrando a /balance...");
   console.log("🔑 APIKEY:", process.env.BINANCE_API_KEY ? "Cargada ✅" : "NO cargada ❌");
   console.log("🔑 APISECRET:", process.env.BINANCE_API_SECRET ? "Cargada ✅" : "NO cargada ❌");
 
-  client.balance((error, balances) => {
+  client.account((error, account) => {
     if (error) {
-      console.error("❌ Error Binance:", error);
+      console.error("❌ Error Binance Spot:", error);
       return res.status(500).json({ error: error.body || error.message });
     }
-    console.log("✅ Balances Binance:", balances);
+
+    console.log("✅ Binance Spot Account:", account);
+
+    // 🔹 Filtramos balances con fondos > 0
+    const balances = account.balances.filter(b => parseFloat(b.free) > 0 || parseFloat(b.locked) > 0);
+
     res.json(balances);
   });
 });
