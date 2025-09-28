@@ -9,10 +9,10 @@
   "keywords": [],
   "author": "",
   "license": "ISC",
+  "type": "module",
   "dependencies": {
     "@types/node": "^22.13.11",
     "axios": "^1.12.2",
-    "binance": "^3.0.9",
     "body-parser": "^2.2.0",
     "cors": "^2.8.5",
     "dotenv": "^17.2.2",
