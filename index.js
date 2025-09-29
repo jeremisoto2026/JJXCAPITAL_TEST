@@ -4,175 +4,151 @@ import dotenv from "dotenv";
 import admin from "firebase-admin";
 import axios from "axios";
 import crypto from "crypto";
-import WebSocket from "ws"; // 👈 añadimos WebSocket
+import WebSocket from "ws";
 
 dotenv.config();
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-// === Firebase Admin con JSON completo en FIREBASE_SERVICE_ACCOUNT ===
+// === Firebase Admin ===
 try {
   if (!admin.apps.length) {
     const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
-
-    admin.initializeApp({
-      credential: admin.credential.cert(serviceAccount),
-    });
+    admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
   }
-  console.log("✅ Firebase Admin inicializado con JSON completo");
+  console.log("✅ Firebase Admin inicializado");
 } catch (err) {
   console.error("❌ Error inicializando Firebase Admin:", err);
 }
 
 const db = admin.firestore();
+const ENC_SECRET = crypto
+  .createHash("sha256")
+  .update(process.env.ENCRYPTION_SECRET)
+  .digest();
+
+// === Funciones de cifrado/descifrado ===
+function encrypt(text) {
+  const iv = crypto.randomBytes(16);
+  const cipher = crypto.createCipheriv("aes-256-gcm", ENC_SECRET, iv);
+  let encrypted = cipher.update(text, "utf8", "hex");
+  encrypted += cipher.final("hex");
+  const authTag = cipher.getAuthTag().toString("hex");
+  return { encrypted, iv: iv.toString("hex"), authTag };
+}
+
+function decrypt(encrypted, ivHex, authTagHex) {
+  const iv = Buffer.from(ivHex, "hex");
+  const authTag = Buffer.from(authTagHex, "hex");
+  const decipher = crypto.createDecipheriv("aes-256-gcm", ENC_SECRET, iv);
+  decipher.setAuthTag(authTag);
+  let decrypted = decipher.update(encrypted, "hex", "utf8");
+  decrypted += decipher.final("utf8");
+  return decrypted;
+}
 
 // === Healthcheck ===
-app.get("/", (req, res) => {
-  res.send("API JJXCAPITAL 🚀 funcionando con Firebase Admin");
-});
+app.get("/", (req, res) => res.send("API JJXCAPITAL 🚀 funcionando"));
 
-// === Guardar mensaje de prueba ===
-app.post("/save", async (req, res) => {
-  try {
-    const { mensaje } = req.body;
-    if (!mensaje) {
-      return res.status(400).json({ success: false, error: "El campo 'mensaje' es obligatorio" });
-    }
-
-    const docRef = await db.collection("mensajes").add({
-      mensaje,
-      fecha: new Date(),
-    });
-
-    res.json({ success: true, id: docRef.id });
-  } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
-  }
-});
-
-// === Guardar operación manual dentro del UID ===
+// === Guardar operación manual ===
 app.post("/save-operation", async (req, res) => {
   try {
-    const { uid, order_id, exchange, operation_type, crypto: cryptoSymbol, fiat, crypto_amount, fiat_amount, exchange_rate, fee, profit } = req.body;
+    const { uid, ...operation } = req.body;
+    if (!uid) return res.status(400).json({ success: false, error: "Falta UID" });
 
-    if (!uid) {
-      return res.status(400).json({ success: false, error: "Falta el UID del usuario" });
-    }
-
-    const operationData = {
-      order_id: order_id || "",
-      exchange,
-      operation_type,
-      crypto: cryptoSymbol,
-      fiat,
-      crypto_amount: parseFloat(crypto_amount) || 0,
-      fiat_amount: parseFloat(fiat_amount) || 0,
-      exchange_rate: parseFloat(exchange_rate),
-      fee: parseFloat(fee) || 0,
-      profit: parseFloat(profit) || 0,
+    const docRef = await db.collection("users").doc(uid).collection("operations").add({
+      ...operation,
       timestamp: new Date(),
-    };
+    });
 
-    const docRef = await db.collection("users").doc(uid).collection("operations").add(operationData);
-
-    res.json({ success: true, id: docRef.id, data: operationData });
+    res.json({ success: true, id: docRef.id, data: operation });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
 });
 
-// === 🔥 WebSocket de Binance para órdenes en tiempo real ===
-async function startUserStream(uid, apiKey, apiSecret) {
+// === WS Binance ===
+async function startUserStream(uid) {
   try {
-    // 1. Crear listenKey
+    const userDoc = await db.collection("users").doc(uid).get();
+    if (!userDoc.exists) return console.error(`❌ Usuario ${uid} no encontrado`);
+
+    const { apiKey, apiSecret } = userDoc.data().binanceKeys || {};
+    if (!apiKey || !apiSecret) return console.error(`❌ No hay claves para ${uid}`);
+
+    // Descifrar claves
+    const decApiKey = decrypt(apiKey.encrypted, apiKey.iv, apiKey.authTag);
+    const decApiSecret = decrypt(apiSecret.encrypted, apiSecret.iv, apiSecret.authTag);
+
+    // Crear listenKey
     const listenResp = await axios.post("https://api.binance.com/api/v3/userDataStream", null, {
-      headers: { "X-MBX-APIKEY": apiKey },
+      headers: { "X-MBX-APIKEY": decApiKey },
     });
-
     const listenKey = listenResp.data.listenKey;
-    console.log(`🔑 ListenKey creado para ${uid}: ${listenKey}`);
+    console.log(`🔑 ListenKey creado para ${uid}`);
 
-    // 2. Conectar al WebSocket
     const ws = new WebSocket(`wss://stream.binance.com:9443/ws/${listenKey}`);
-
     ws.on("open", () => console.log(`📡 WS abierto para ${uid}`));
 
     ws.on("message", async (raw) => {
-      try {
-        const data = JSON.parse(raw.toString());
-
-        // Solo nos interesan los reportes de órdenes
-        if (data.e === "executionReport") {
-          console.log("📥 Evento recibido:", data);
-
-          const operationData = {
-            order_id: data.i.toString(),
-            exchange: "Binance",
-            operation_type: data.S === "SELL" ? "Venta" : "Compra",
-            crypto: data.s.replace("USDT", ""),
-            fiat: "USDT",
-            crypto_amount: parseFloat(data.l), // cantidad ejecutada
-            fiat_amount: parseFloat(data.Z), // total acumulado en USDT
-            exchange_rate: parseFloat(data.Z) / (parseFloat(data.l) || 1),
-            fee: 0,
-            profit: 0,
-            timestamp: new Date(data.T),
-          };
-
-          await db.collection("users").doc(uid).collection("operations").doc(data.i.toString()).set(operationData);
-
-          console.log(`✅ Orden guardada para ${uid}: ${data.i}`);
-        }
-      } catch (err) {
-        console.error("❌ Error procesando evento WS:", err);
+      const data = JSON.parse(raw.toString());
+      if (data.e === "executionReport") {
+        const op = {
+          order_id: data.i.toString(),
+          exchange: "Binance",
+          operation_type: data.S === "SELL" ? "Venta" : "Compra",
+          crypto: data.s.replace("USDT", ""),
+          fiat: "USDT",
+          crypto_amount: parseFloat(data.l),
+          fiat_amount: parseFloat(data.Z),
+          exchange_rate: parseFloat(data.Z) / (parseFloat(data.l) || 1),
+          fee: 0,
+          profit: 0,
+          timestamp: new Date(data.T),
+        };
+        await db.collection("users").doc(uid).collection("operations").doc(data.i.toString()).set(op);
+        console.log(`✅ Orden guardada para ${uid}: ${data.i}`);
       }
     });
 
-    ws.on("close", () => console.log(`❌ WS cerrado para ${uid}`));
-    ws.on("error", (err) => console.error(`❌ Error WS para ${uid}:`, err));
-
-    // 3. Renovar listenKey cada 30 minutos
+    // Mantener vivo listenKey
     setInterval(async () => {
-      try {
-        await axios.put(
-          `https://api.binance.com/api/v3/userDataStream?listenKey=${listenKey}`,
-          null,
-          { headers: { "X-MBX-APIKEY": apiKey } }
-        );
-        console.log(`🔄 ListenKey renovado para ${uid}`);
-      } catch (err) {
-        console.error("❌ Error renovando listenKey:", err.response?.data || err.message);
-      }
+      await axios.put(`https://api.binance.com/api/v3/userDataStream?listenKey=${listenKey}`, null, {
+        headers: { "X-MBX-APIKEY": decApiKey },
+      });
+      console.log(`🔄 ListenKey renovado para ${uid}`);
     }, 1000 * 60 * 30);
   } catch (err) {
-    console.error("❌ Error iniciando userStream:", err.response?.data || err.message);
+    console.error("❌ Error en WS:", err.response?.data || err.message);
   }
 }
 
-// === Endpoint para conectar Binance ===
+// === Conectar Binance (cifrado) ===
 app.post("/connect-binance", async (req, res) => {
   try {
     const { uid, apiKey, apiSecret } = req.body;
-
     if (!uid || !apiKey || !apiSecret) {
-      return res.status(400).json({ success: false, error: "Faltan uid, apiKey o apiSecret" });
+      return res.status(400).json({ success: false, error: "Faltan datos" });
     }
 
-    // Guardamos las claves en Firestore (⚠️ solo ejemplo, mejor cifrar)
+    const encApiKey = encrypt(apiKey);
+    const encApiSecret = encrypt(apiSecret);
+
     await db.collection("users").doc(uid).set(
       {
-        binanceApiKey: apiKey,
-        binanceApiSecret: apiSecret,
+        binanceKeys: {
+          apiKey: encApiKey,
+          apiSecret: encApiSecret,
+        },
         binanceConnected: true,
       },
       { merge: true }
     );
 
-    // Inicia el WebSocket para ese usuario
-    startUserStream(uid, apiKey, apiSecret);
+    startUserStream(uid);
 
-    res.json({ success: true, message: "Binance conectado ✅" });
+    res.json({ success: true, message: "Binance conectado ✅ (cifrado)" });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
