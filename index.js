@@ -156,6 +156,30 @@ app.post("/connect-binance", async (req, res) => {
     res.status(500).json({ success: false, error: err.message });
   }
 });
+
+// ✅ Alias: verify-binance-keys → connect-binance
+app.post("/api/verify-binance-keys", async (req, res) => {
+  try {
+    const { uid, apiKey, apiSecret } = req.body;
+    if (!uid || !apiKey || !apiSecret) {
+      return res.status(400).json({ success: false, error: "Faltan uid, apiKey o apiSecret" });
+    }
+
+    await db.collection("users").doc(uid).set({
+      binanceApiKey: apiKey,
+      binanceApiSecret: encrypt(apiSecret),
+      binanceConnected: true,
+      binanceConnectedAt: new Date(),
+    }, { merge: true });
+
+    await startUserStream(uid, apiKey, apiSecret);
+
+    res.json({ success: true, message: "Binance conectado y verificado ✅" });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 app.post("/disconnect-binance", async (req, res) => {
   try {
     const { uid } = req.body;
