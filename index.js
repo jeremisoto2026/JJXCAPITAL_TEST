@@ -1,3 +1,4 @@
+// index.js
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
@@ -11,149 +12,316 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// === Firebase Admin ===
+/**
+ * Init Firebase Admin (desde JSON completo en env FIREBASE_SERVICE_ACCOUNT).
+ * Si no lo tienes, puedes construir el objeto a partir de variables separadas.
+ */
 try {
   if (!admin.apps.length) {
-    const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
-    admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
+    const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT || "{}");
+
+    admin.initializeApp({
+      credential: admin.credential.cert(serviceAccount),
+    });
   }
   console.log("✅ Firebase Admin inicializado");
 } catch (err) {
   console.error("❌ Error inicializando Firebase Admin:", err);
+  // No hacemos process.exit para que el servidor siga corriendo y el error sea visible.
 }
 
 const db = admin.firestore();
-const ENC_SECRET = crypto
-  .createHash("sha256")
-  .update(process.env.ENCRYPTION_SECRET)
-  .digest();
 
-// === Funciones de cifrado/descifrado ===
-function encrypt(text) {
-  const iv = crypto.randomBytes(16);
-  const cipher = crypto.createCipheriv("aes-256-gcm", ENC_SECRET, iv);
-  let encrypted = cipher.update(text, "utf8", "hex");
-  encrypted += cipher.final("hex");
-  const authTag = cipher.getAuthTag().toString("hex");
-  return { encrypted, iv: iv.toString("hex"), authTag };
-}
-
-function decrypt(encrypted, ivHex, authTagHex) {
-  const iv = Buffer.from(ivHex, "hex");
-  const authTag = Buffer.from(authTagHex, "hex");
-  const decipher = crypto.createDecipheriv("aes-256-gcm", ENC_SECRET, iv);
-  decipher.setAuthTag(authTag);
-  let decrypted = decipher.update(encrypted, "hex", "utf8");
-  decrypted += decipher.final("utf8");
-  return decrypted;
-}
-
-// === Healthcheck ===
-app.get("/", (req, res) => res.send("API JJXCAPITAL 🚀 funcionando"));
-
-// === Guardar operación manual ===
-app.post("/save-operation", async (req, res) => {
-  try {
-    const { uid, ...operation } = req.body;
-    if (!uid) return res.status(400).json({ success: false, error: "Falta UID" });
-
-    const docRef = await db.collection("users").doc(uid).collection("operations").add({
-      ...operation,
-      timestamp: new Date(),
-    });
-
-    res.json({ success: true, id: docRef.id, data: operation });
-  } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
+/**
+ * Opcional: cifrado AES-256-GCM para guardar apiSecret en Firestore.
+ * - SETEA EN .env ENCRYPTION_KEY con una base64 de 32 bytes (ej. crypto.randomBytes(32).toString('base64')).
+ * - Si no se define ENCRYPTION_KEY, guardamos el secret en texto plano (NO recomendado en producción).
+ */
+const ENCRYPTION_KEY_BASE64 = process.env.ENCRYPTION_KEY || null;
+let ENCRYPTION_KEY = null;
+if (ENCRYPTION_KEY_BASE64) {
+  ENCRYPTION_KEY = Buffer.from(ENCRYPTION_KEY_BASE64, "base64");
+  if (ENCRYPTION_KEY.length !== 32) {
+    console.warn("⚠️ ENCRYPTION_KEY debe ser 32 bytes (base64). El cifrado no funcionará correctamente.");
+    ENCRYPTION_KEY = null;
   }
-});
+}
 
-// === WS Binance ===
-async function startUserStream(uid) {
+const encrypt = (plainText) => {
+  if (!ENCRYPTION_KEY) return plainText;
+  const iv = crypto.randomBytes(12); // 96 bits recommended for GCM
+  const cipher = crypto.createCipheriv("aes-256-gcm", ENCRYPTION_KEY, iv);
+  const encrypted = Buffer.concat([cipher.update(plainText, "utf8"), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  // Guardamos iv + tag + ciphertext (base64)
+  return Buffer.concat([iv, tag, encrypted]).toString("base64");
+};
+
+const decrypt = (payload) => {
+  if (!ENCRYPTION_KEY) return payload;
   try {
-    const userDoc = await db.collection("users").doc(uid).get();
-    if (!userDoc.exists) return console.error(`❌ Usuario ${uid} no encontrado`);
+    const full = Buffer.from(payload, "base64");
+    const iv = full.slice(0, 12);
+    const tag = full.slice(12, 28);
+    const encrypted = full.slice(28);
+    const decipher = crypto.createDecipheriv("aes-256-gcm", ENCRYPTION_KEY, iv);
+    decipher.setAuthTag(tag);
+    const dec = Buffer.concat([decipher.update(encrypted), decipher.final()]).toString("utf8");
+    return dec;
+  } catch (err) {
+    console.error("❌ Error decrypt:", err);
+    // Si falla, devolvemos el original por compatibilidad (posible que esté en texto plano)
+    return payload;
+  }
+};
 
-    const { apiKey, apiSecret } = userDoc.data().binanceKeys || {};
-    if (!apiKey || !apiSecret) return console.error(`❌ No hay claves para ${uid}`);
+/**
+ * Map para manejar streams activos en memoria:
+ * streams[uid] = { ws, renewIntervalId, listenKey }
+ */
+const streams = {};
 
-    // Descifrar claves
-    const decApiKey = decrypt(apiKey.encrypted, apiKey.iv, apiKey.authTag);
-    const decApiSecret = decrypt(apiSecret.encrypted, apiSecret.iv, apiSecret.authTag);
+/**
+ * startUserStream
+ * - Crea listenKey REST
+ * - Abre WS en wss://stream.binance.com:9443/ws/{listenKey}
+ * - Guarda executionReport como documento en users/{uid}/operations/{orderId}
+ * - Renueva listenKey cada 30 minutos
+ */
+async function startUserStream(uid, apiKey, apiSecretPlain) {
+  try {
+    // Si ya existe un stream para el uid, lo reiniciamos
+    if (streams[uid]) {
+      console.log(`♻️ Stream existente para ${uid} — cerrando y reiniciando`);
+      stopUserStream(uid);
+    }
 
-    // Crear listenKey
-    const listenResp = await axios.post("https://api.binance.com/api/v3/userDataStream", null, {
-      headers: { "X-MBX-APIKEY": decApiKey },
-    });
-    const listenKey = listenResp.data.listenKey;
-    console.log(`🔑 ListenKey creado para ${uid}`);
+    // 1) Crear listenKey
+    const listenResp = await axios.post(
+      "https://api.binance.com/api/v3/userDataStream",
+      null,
+      { headers: { "X-MBX-APIKEY": apiKey } }
+    );
 
+    const listenKey = listenResp.data?.listenKey;
+    if (!listenKey) throw new Error("No se obtuvo listenKey desde Binance");
+
+    console.log(`🔑 ListenKey creado para ${uid}: ${listenKey}`);
+
+    // 2) Abrir WebSocket
     const ws = new WebSocket(`wss://stream.binance.com:9443/ws/${listenKey}`);
-    ws.on("open", () => console.log(`📡 WS abierto para ${uid}`));
 
-    ws.on("message", async (raw) => {
-      const data = JSON.parse(raw.toString());
-      if (data.e === "executionReport") {
-        const op = {
-          order_id: data.i.toString(),
-          exchange: "Binance",
-          operation_type: data.S === "SELL" ? "Venta" : "Compra",
-          crypto: data.s.replace("USDT", ""),
-          fiat: "USDT",
-          crypto_amount: parseFloat(data.l),
-          fiat_amount: parseFloat(data.Z),
-          exchange_rate: parseFloat(data.Z) / (parseFloat(data.l) || 1),
-          fee: 0,
-          profit: 0,
-          timestamp: new Date(data.T),
-        };
-        await db.collection("users").doc(uid).collection("operations").doc(data.i.toString()).set(op);
-        console.log(`✅ Orden guardada para ${uid}: ${data.i}`);
+    ws.on("open", () => {
+      console.log(`📡 WS abierto para ${uid}`);
+    });
+
+    ws.on("message", async (msg) => {
+      try {
+        const data = JSON.parse(msg.toString());
+
+        // Filtramos executionReport (evento de orden)
+        if (data.e === "executionReport") {
+          // Construimos objeto de operación (ajusta campos según lo que necesites)
+          const orderId = data.i?.toString?.() || `${Date.now()}`;
+          const executedQty = parseFloat(data.l || data.q || "0"); // cantidad ejecutada
+          const cumQuote = parseFloat(data.Z || data.z || "0"); // acumulado en quote asset
+          const timestamp = data.T ? new Date(data.T) : new Date();
+
+          const operationData = {
+            order_id: orderId,
+            exchange: "Binance",
+            operation_type: data.S === "SELL" ? "Venta" : "Compra",
+            crypto: (data.s || "").replace(/USDT$/i, ""),
+            fiat: "USDT",
+            crypto_amount: executedQty,
+            fiat_amount: cumQuote,
+            exchange_rate: cumQuote / (executedQty || 1),
+            fee: 0,
+            profit: 0,
+            raw: data, // opcional: almacenar raw para depuración
+            timestamp: timestamp,
+          };
+
+          // Guardamos en Firestore: users/{uid}/operations/{orderId}
+          await db
+            .collection("users")
+            .doc(uid)
+            .collection("operations")
+            .doc(orderId)
+            .set(operationData, { merge: true });
+
+          console.log(`✅ Orden guardada para ${uid}: ${orderId}`);
+        }
+      } catch (err) {
+        console.error("❌ Error procesando mensaje WS:", err);
       }
     });
 
-    // Mantener vivo listenKey
-    setInterval(async () => {
-      await axios.put(`https://api.binance.com/api/v3/userDataStream?listenKey=${listenKey}`, null, {
-        headers: { "X-MBX-APIKEY": decApiKey },
-      });
-      console.log(`🔄 ListenKey renovado para ${uid}`);
-    }, 1000 * 60 * 30);
+    ws.on("close", (code, reason) => {
+      console.log(`❌ WS cerrado para ${uid} — code:${code} reason:${reason}`);
+      // Limpiamos recursos si se cerró
+      stopUserStream(uid);
+    });
+
+    ws.on("error", (err) => {
+      console.error(`❌ Error WS para ${uid}:`, err && err.message ? err.message : err);
+    });
+
+    // 3) Renovar listenKey cada 30 minutos (put /userDataStream)
+    const renewIntervalId = setInterval(async () => {
+      try {
+        await axios.put(
+          `https://api.binance.com/api/v3/userDataStream?listenKey=${listenKey}`,
+          null,
+          { headers: { "X-MBX-APIKEY": apiKey } }
+        );
+        console.log(`🔄 ListenKey renovado para ${uid}`);
+      } catch (err) {
+        console.error("❌ Error renovando listenKey:", err.response?.data || err.message);
+      }
+    }, 1000 * 60 * 30); // 30 minutos
+
+    // Guardamos en memoria
+    streams[uid] = { ws, renewIntervalId, listenKey };
+
+    // Guardamos listenKey + timestamp en Firestore (opcional, para seguimiento)
+    await db
+      .collection("users")
+      .doc(uid)
+      .set(
+        {
+          lastListenKey: listenKey,
+          lastListenKeyAt: new Date(),
+        },
+        { merge: true }
+      );
   } catch (err) {
-    console.error("❌ Error en WS:", err.response?.data || err.message);
+    console.error("❌ Error iniciando userStream para", uid, err.response?.data || err.message || err);
+    // No rethrowamos para no cortar el server
   }
 }
 
-// === Conectar Binance (cifrado) ===
+function stopUserStream(uid) {
+  const s = streams[uid];
+  if (!s) return;
+  try {
+    if (s.ws && s.ws.readyState === WebSocket.OPEN) {
+      s.ws.close();
+    }
+  } catch (err) {
+    console.warn("⚠️ Error cerrando WS:", err);
+  }
+  try {
+    clearInterval(s.renewIntervalId);
+  } catch (err) {
+    /* ignore */
+  }
+  delete streams[uid];
+  console.log(`🛑 Stream detenido para ${uid}`);
+}
+
+/**
+ * Endpoint: Conectar Binance (guarda claves y arranca el stream)
+ * Body: { uid, apiKey, apiSecret }
+ */
 app.post("/connect-binance", async (req, res) => {
   try {
     const { uid, apiKey, apiSecret } = req.body;
     if (!uid || !apiKey || !apiSecret) {
-      return res.status(400).json({ success: false, error: "Faltan datos" });
+      return res.status(400).json({ success: false, error: "Faltan uid, apiKey o apiSecret" });
     }
 
-    const encApiKey = encrypt(apiKey);
-    const encApiSecret = encrypt(apiSecret);
-
+    // Guardamos (cifrado opcional)
     await db.collection("users").doc(uid).set(
       {
-        binanceKeys: {
-          apiKey: encApiKey,
-          apiSecret: encApiSecret,
-        },
+        binanceApiKey: apiKey,
+        binanceApiSecret: encrypt(apiSecret),
         binanceConnected: true,
+        binanceConnectedAt: new Date(),
       },
       { merge: true }
     );
 
-    startUserStream(uid);
+    // Arrancamos el WS para este usuario (debe usar secret desencriptado internamente)
+    const secretPlain = decrypt(encrypt(apiSecret)); // Si ENCRYPTION_KEY no existe, devuelve igual
+    await startUserStream(uid, apiKey, secretPlain);
 
-    res.json({ success: true, message: "Binance conectado ✅ (cifrado)" });
+    return res.json({ success: true, message: "Binance conectado y stream iniciado ✅" });
   } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
+    console.error("❌ /connect-binance error:", err);
+    return res.status(500).json({ success: false, error: err.message || err });
   }
 });
 
-// === Servidor ===
+/**
+ * Endpoint: Desconectar Binance y detener stream
+ * Body: { uid }
+ */
+app.post("/disconnect-binance", async (req, res) => {
+  try {
+    const { uid } = req.body;
+    if (!uid) return res.status(400).json({ success: false, error: "Falta uid" });
+
+    // Detenemos stream en memoria
+    stopUserStream(uid);
+
+    // Actualizamos Firestore
+    await db.collection("users").doc(uid).set(
+      {
+        binanceConnected: false,
+        binanceDisconnectedAt: new Date(),
+      },
+      { merge: true }
+    );
+
+    return res.json({ success: true, message: "Binance desconectado y stream detenido" });
+  } catch (err) {
+    console.error("❌ /disconnect-binance error:", err);
+    return res.status(500).json({ success: false, error: err.message || err });
+  }
+});
+
+/**
+ * Reiniciar streams al arrancar el servidor para usuarios que ya estaban conectados.
+ * Busca documentos users donde binanceConnected == true y tiene binanceApiKey.
+ */
+async function startAllUserStreamsOnBoot() {
+  try {
+    const qSnap = await db.collection("users").where("binanceConnected", "==", true).get();
+    if (qSnap.empty) {
+      console.log("ℹ️ No hay usuarios con binanceConnected: true al iniciar");
+      return;
+    }
+    console.log(`🔁 Reiniciando streams para ${qSnap.size} usuarios...`);
+    qSnap.forEach((doc) => {
+      const data = doc.data();
+      const apiKey = data.binanceApiKey;
+      const apiSecretStored = data.binanceApiSecret; // podría estar cifrado
+      if (!apiKey || !apiSecretStored) {
+        console.warn(`⚠️ Usuario ${doc.id} marca binanceConnected true pero faltan claves`);
+        return;
+      }
+      const secretPlain = decrypt(apiSecretStored);
+      startUserStream(doc.id, apiKey, secretPlain);
+    });
+  } catch (err) {
+    console.error("❌ Error arrancando streams en boot:", err);
+  }
+}
+
+/**
+ * Health / test
+ */
+app.get("/", (req, res) => {
+  res.send("API JJXCAPITAL 🚀 funcionando con Firebase Admin + Binance WS");
+});
+
+/**
+ * Start server y luego arrancar streams existentes
+ */
 const PORT = process.env.PORT || 8080;
-app.listen(PORT, () => console.log(`🚀 Servidor corriendo en puerto ${PORT}`));
+app.listen(PORT, async () => {
+  console.log(`🚀 Servidor corriendo en puerto ${PORT}`);
+  // Intentamos reiniciar streams existentes (no bloqueante)
+  startAllUserStreamsOnBoot().catch((e) => console.error(e));
+});
