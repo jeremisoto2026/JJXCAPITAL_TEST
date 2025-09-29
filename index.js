@@ -4,6 +4,7 @@ import dotenv from "dotenv";
 import admin from "firebase-admin";
 import axios from "axios";
 import crypto from "crypto";
+import WebSocket from "ws"; // 👈 añadimos WebSocket
 
 dotenv.config();
 const app = express();
@@ -31,11 +32,6 @@ app.get("/", (req, res) => {
   res.send("API JJXCAPITAL 🚀 funcionando con Firebase Admin");
 });
 
-// === Ping ===
-app.get("/ping", (req, res) => {
-  res.json({ status: "Servidor activo ✅" });
-});
-
 // === Guardar mensaje de prueba ===
 app.post("/save", async (req, res) => {
   try {
@@ -51,7 +47,6 @@ app.post("/save", async (req, res) => {
 
     res.json({ success: true, id: docRef.id });
   } catch (err) {
-    console.error("❌ Error Firebase Admin:", err);
     res.status(500).json({ success: false, error: err.message });
   }
 });
@@ -63,13 +58,6 @@ app.post("/save-operation", async (req, res) => {
 
     if (!uid) {
       return res.status(400).json({ success: false, error: "Falta el UID del usuario" });
-    }
-
-    if (!exchange || !operation_type || !cryptoSymbol || !fiat || !exchange_rate) {
-      return res.status(400).json({
-        success: false,
-        error: "Faltan campos obligatorios: exchange, operation_type, crypto, fiat, exchange_rate",
-      });
     }
 
     const operationData = {
@@ -90,67 +78,103 @@ app.post("/save-operation", async (req, res) => {
 
     res.json({ success: true, id: docRef.id, data: operationData });
   } catch (err) {
-    console.error("❌ Error guardando operación:", err);
     res.status(500).json({ success: false, error: err.message });
   }
 });
 
-// === Sincronizar órdenes Spot automáticamente al UID ===
-app.post("/sync-operations", async (req, res) => {
+// === 🔥 WebSocket de Binance para órdenes en tiempo real ===
+async function startUserStream(uid, apiKey, apiSecret) {
   try {
-    const { uid, apiKey, apiSecret, symbol = "BTCUSDT" } = req.body;
+    // 1. Crear listenKey
+    const listenResp = await axios.post("https://api.binance.com/api/v3/userDataStream", null, {
+      headers: { "X-MBX-APIKEY": apiKey },
+    });
+
+    const listenKey = listenResp.data.listenKey;
+    console.log(`🔑 ListenKey creado para ${uid}: ${listenKey}`);
+
+    // 2. Conectar al WebSocket
+    const ws = new WebSocket(`wss://stream.binance.com:9443/ws/${listenKey}`);
+
+    ws.on("open", () => console.log(`📡 WS abierto para ${uid}`));
+
+    ws.on("message", async (raw) => {
+      try {
+        const data = JSON.parse(raw.toString());
+
+        // Solo nos interesan los reportes de órdenes
+        if (data.e === "executionReport") {
+          console.log("📥 Evento recibido:", data);
+
+          const operationData = {
+            order_id: data.i.toString(),
+            exchange: "Binance",
+            operation_type: data.S === "SELL" ? "Venta" : "Compra",
+            crypto: data.s.replace("USDT", ""),
+            fiat: "USDT",
+            crypto_amount: parseFloat(data.l), // cantidad ejecutada
+            fiat_amount: parseFloat(data.Z), // total acumulado en USDT
+            exchange_rate: parseFloat(data.Z) / (parseFloat(data.l) || 1),
+            fee: 0,
+            profit: 0,
+            timestamp: new Date(data.T),
+          };
+
+          await db.collection("users").doc(uid).collection("operations").doc(data.i.toString()).set(operationData);
+
+          console.log(`✅ Orden guardada para ${uid}: ${data.i}`);
+        }
+      } catch (err) {
+        console.error("❌ Error procesando evento WS:", err);
+      }
+    });
+
+    ws.on("close", () => console.log(`❌ WS cerrado para ${uid}`));
+    ws.on("error", (err) => console.error(`❌ Error WS para ${uid}:`, err));
+
+    // 3. Renovar listenKey cada 30 minutos
+    setInterval(async () => {
+      try {
+        await axios.put(
+          `https://api.binance.com/api/v3/userDataStream?listenKey=${listenKey}`,
+          null,
+          { headers: { "X-MBX-APIKEY": apiKey } }
+        );
+        console.log(`🔄 ListenKey renovado para ${uid}`);
+      } catch (err) {
+        console.error("❌ Error renovando listenKey:", err.response?.data || err.message);
+      }
+    }, 1000 * 60 * 30);
+  } catch (err) {
+    console.error("❌ Error iniciando userStream:", err.response?.data || err.message);
+  }
+}
+
+// === Endpoint para conectar Binance ===
+app.post("/connect-binance", async (req, res) => {
+  try {
+    const { uid, apiKey, apiSecret } = req.body;
 
     if (!uid || !apiKey || !apiSecret) {
       return res.status(400).json({ success: false, error: "Faltan uid, apiKey o apiSecret" });
     }
 
-    const timestamp = Date.now();
-    const queryString = `symbol=${symbol}&timestamp=${timestamp}`;
-    const signature = crypto
-      .createHmac("sha256", apiSecret)
-      .update(queryString)
-      .digest("hex");
-
-    const response = await axios.get(
-      `https://api.binance.com/api/v3/allOrders?${queryString}&signature=${signature}`,
-      { headers: { "X-MBX-APIKEY": apiKey } }
+    // Guardamos las claves en Firestore (⚠️ solo ejemplo, mejor cifrar)
+    await db.collection("users").doc(uid).set(
+      {
+        binanceApiKey: apiKey,
+        binanceApiSecret: apiSecret,
+        binanceConnected: true,
+      },
+      { merge: true }
     );
 
-    const orders = response.data;
+    // Inicia el WebSocket para ese usuario
+    startUserStream(uid, apiKey, apiSecret);
 
-    if (!orders || orders.length === 0) {
-      return res.json({ success: true, message: "No hay órdenes en Binance para este par." });
-    }
-
-    const batch = db.batch();
-    const userRef = db.collection("users").doc(uid);
-
-    orders.forEach((order) => {
-      const ref = userRef.collection("operations").doc(order.orderId.toString());
-      const operationData = {
-        order_id: order.orderId.toString(),
-        exchange: "Binance",
-        operation_type: order.side === "SELL" ? "Venta" : "Compra",
-        crypto: order.symbol.replace("USDT", ""), // Ejemplo: BTCUSDT → BTC
-        fiat: "USDT",
-        crypto_amount: parseFloat(order.executedQty),
-        fiat_amount: parseFloat(order.cummulativeQuoteQty),
-        exchange_rate:
-          parseFloat(order.cummulativeQuoteQty) /
-          (parseFloat(order.executedQty) || 1),
-        fee: 0,
-        profit: 0,
-        timestamp: new Date(order.time),
-      };
-      batch.set(ref, operationData);
-    });
-
-    await batch.commit();
-
-    res.json({ success: true, count: orders.length });
+    res.json({ success: true, message: "Binance conectado ✅" });
   } catch (err) {
-    console.error("❌ Error en sync-operations:", err.response?.data || err.message);
-    res.status(500).json({ success: false, error: err.response?.data || err.message });
+    res.status(500).json({ success: false, error: err.message });
   }
 });
 
