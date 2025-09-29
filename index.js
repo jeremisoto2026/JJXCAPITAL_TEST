@@ -185,7 +185,7 @@ async function startAllUserStreamsOnBoot() {
 app.get("/", (req, res) => res.send("API JJXCAPITAL 🚀 online"));
 
 // === Start server ===
-const PORT = process.env.PORT || 8080;
+const PORT = process.env.PORT; // ⚠️ Railway asigna el puerto
 app.listen(PORT, () => {
   console.log(`🚀 Server running on ${PORT}`);
   startAllUserStreamsOnBoot();
