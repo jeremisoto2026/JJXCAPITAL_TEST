@@ -142,7 +142,6 @@ function stopUserStream(uid) {
 // Conectar Binance
 app.post("/api/connect-binance", async (req, res) => {
   try {
-    // 👇 LOG PARA DEPURAR
     console.log("📩 Body recibido en /connect-binance:", req.body);
 
     const { uid, apiKey, apiSecret } = req.body;
@@ -167,7 +166,6 @@ app.post("/api/connect-binance", async (req, res) => {
 // Alias para compatibilidad
 app.post("/api/verify-binance-keys", async (req, res) => {
   try {
-    // 👇 LOG PARA DEPURAR
     console.log("📩 Body recibido en /verify-binance-keys:", req.body);
 
     const { uid, apiKey, apiSecret } = req.body;
@@ -189,7 +187,7 @@ app.post("/api/verify-binance-keys", async (req, res) => {
   }
 });
 
-// Desconectar Binance
+// Desconectar Binance (opción 2: borrar claves)
 app.post("/api/disconnect-binance", async (req, res) => {
   try {
     console.log("📩 Body recibido en /disconnect-binance:", req.body);
@@ -198,13 +196,17 @@ app.post("/api/disconnect-binance", async (req, res) => {
     if (!uid) return res.status(400).json({ success: false, error: "Falta uid" });
 
     stopUserStream(uid);
+
     await db.collection("users").doc(uid).set({
       binanceConnected: false,
+      binanceApiKey: admin.firestore.FieldValue.delete(),
+      binanceApiSecret: admin.firestore.FieldValue.delete(),
       binanceDisconnectedAt: new Date(),
     }, { merge: true });
 
-    res.json({ success: true, message: "Binance desconectado ❌" });
+    res.json({ success: true, message: "Binance desconectado y claves eliminadas ❌" });
   } catch (err) {
+    console.error("❌ Error en /disconnect-binance:", err);
     res.status(500).json({ success: false, error: err.message });
   }
 });
