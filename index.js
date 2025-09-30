@@ -5,7 +5,6 @@ import dotenv from "dotenv";
 import admin from "firebase-admin";
 import axios from "axios";
 import crypto from "crypto";
-import WebSocket from "ws";
 
 dotenv.config();
 const app = express();
@@ -57,93 +56,72 @@ const decrypt = (payload) => {
   }
 };
 
-// === Map de streams activos ===
-const streams = {};
-
-// === Start Stream ===
-async function startUserStream(uid, apiKey, apiSecretPlain) {
+// === Función: traer órdenes P2P ===
+async function fetchP2POrders(uid, apiKey, apiSecret) {
   try {
-    if (streams[uid]) stopUserStream(uid);
+    const query = {
+      page: 1,
+      rows: 20, // trae las últimas 20
+    };
 
-    const listenResp = await axios.post(
-      "https://api.binance.com/api/v3/userDataStream",
-      null,
-      { headers: { "X-MBX-APIKEY": apiKey } }
-    );
-    const listenKey = listenResp.data?.listenKey;
-    if (!listenKey) throw new Error("No listenKey");
-
-    console.log(`🔑 ListenKey creado para ${uid}`);
-
-    const ws = new WebSocket(`wss://stream.binance.com:9443/ws/${listenKey}`);
-
-    ws.on("open", () => console.log(`📡 WS abierto para ${uid}`));
-    ws.on("message", async (msg) => {
-      try {
-        const data = JSON.parse(msg.toString());
-        if (data.e === "executionReport") {
-          const orderId = data.i?.toString?.() || `${Date.now()}`;
-          const executedQty = parseFloat(data.l || "0");
-          const cumQuote = parseFloat(data.Z || "0");
-          const op = {
-            order_id: orderId,
-            exchange: "Binance",
-            operation_type: data.S === "SELL" ? "Venta" : "Compra",
-            crypto: (data.s || "").replace(/USDT$/i, ""),
-            fiat: "USDT",
-            crypto_amount: executedQty,
-            fiat_amount: cumQuote,
-            exchange_rate: cumQuote / (executedQty || 1),
-            fee: 0,
-            profit: 0,
-            timestamp: new Date(data.T || Date.now()),
-            raw: data,
-          };
-          await db.collection("users").doc(uid).collection("operations").doc(orderId).set(op, { merge: true });
-          console.log(`✅ Orden guardada ${uid}:${orderId}`);
+    const resp = await axios.post(
+      "https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/order/query",
+      query,
+      {
+        headers: {
+          "X-MBX-APIKEY": apiKey,
+          "Content-Type": "application/json"
         }
-      } catch (err) {
-        console.error("❌ Error WS msg:", err);
       }
-    });
-    ws.on("close", () => stopUserStream(uid));
-    ws.on("error", (err) => console.error(`❌ WS error ${uid}:`, err.message));
+    );
 
-    const renewIntervalId = setInterval(async () => {
-      try {
-        await axios.put(
-          `https://api.binance.com/api/v3/userDataStream?listenKey=${listenKey}`,
-          null,
-          { headers: { "X-MBX-APIKEY": apiKey } }
-        );
-        console.log(`🔄 ListenKey renovado para ${uid}`);
-      } catch (err) {
-        console.error("❌ Error renovando listenKey:", err.response?.data || err.message);
-      }
-    }, 1000 * 60 * 30);
+    const orders = resp.data?.data || [];
+    for (const ord of orders) {
+      const op = {
+        order_id: ord.orderNumber.toString(),
+        exchange: "Binance",
+        operation_type: ord.tradeType === "SELL" ? "Venta" : "Compra",
+        crypto: ord.asset,
+        fiat: ord.fiat,
+        crypto_amount: parseFloat(ord.amount),
+        fiat_amount: parseFloat(ord.totalPrice),
+        exchange_rate: parseFloat(ord.price),
+        fee: 0,
+        profit: 0,
+        timestamp: new Date(ord.createTime),
+        raw: ord,
+      };
 
-    streams[uid] = { ws, renewIntervalId, listenKey };
-    await db.collection("users").doc(uid).set({ lastListenKey: listenKey, lastListenKeyAt: new Date() }, { merge: true });
+      await db
+        .collection("users")
+        .doc(uid)
+        .collection("operations")
+        .doc(op.order_id)
+        .set(op, { merge: true });
+    }
+
+    console.log(`✅ Órdenes P2P actualizadas para ${uid}`);
   } catch (err) {
-    console.error(`❌ startUserStream ${uid}:`, err.message);
+    console.error("❌ Error fetchP2POrders:", err.response?.data || err.message);
   }
 }
-function stopUserStream(uid) {
-  const s = streams[uid];
-  if (!s) return;
-  try { s.ws?.close(); } catch {}
-  try { clearInterval(s.renewIntervalId); } catch {}
-  delete streams[uid];
-  console.log(`🛑 Stream detenido para ${uid}`);
-}
+
+// === CRON: cada 1 min actualiza órdenes P2P de todos los usuarios ===
+setInterval(async () => {
+  const qSnap = await db.collection("users").where("binanceConnected", "==", true).get();
+  qSnap.forEach(async (docSnap) => {
+    const d = docSnap.data();
+    if (!d.binanceApiKey || !d.binanceApiSecret) return;
+    const secret = decrypt(d.binanceApiSecret);
+    await fetchP2POrders(docSnap.id, d.binanceApiKey, secret);
+  });
+}, 1000 * 60); // cada 1 min
 
 // === Endpoints ===
 
 // Conectar Binance
 app.post("/api/connect-binance", async (req, res) => {
   try {
-    console.log("📩 Body recibido en /connect-binance:", req.body);
-
     const { uid, apiKey, apiSecret } = req.body;
     if (!uid || !apiKey || !apiSecret) {
       return res.status(400).json({ success: false, error: "Faltan campos" });
@@ -156,46 +134,17 @@ app.post("/api/connect-binance", async (req, res) => {
       binanceConnectedAt: new Date(),
     }, { merge: true });
 
-    await startUserStream(uid, apiKey, apiSecret);
     res.json({ success: true, message: "Binance conectado ✅" });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
 });
 
-// Alias para compatibilidad
-app.post("/api/verify-binance-keys", async (req, res) => {
-  try {
-    console.log("📩 Body recibido en /verify-binance-keys:", req.body);
-
-    const { uid, apiKey, apiSecret } = req.body;
-    if (!uid || !apiKey || !apiSecret) {
-      return res.status(400).json({ success: false, error: "Faltan uid, apiKey o apiSecret" });
-    }
-
-    await db.collection("users").doc(uid).set({
-      binanceApiKey: apiKey,
-      binanceApiSecret: encrypt(apiSecret),
-      binanceConnected: true,
-      binanceConnectedAt: new Date(),
-    }, { merge: true });
-
-    await startUserStream(uid, apiKey, apiSecret);
-    res.json({ success: true, message: "Binance conectado y verificado ✅" });
-  } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
-  }
-});
-
-// Desconectar Binance (opción 2: borrar claves)
+// Desconectar Binance
 app.post("/api/disconnect-binance", async (req, res) => {
   try {
-    console.log("📩 Body recibido en /disconnect-binance:", req.body);
-
     const { uid } = req.body;
     if (!uid) return res.status(400).json({ success: false, error: "Falta uid" });
-
-    stopUserStream(uid);
 
     await db.collection("users").doc(uid).set({
       binanceConnected: false,
@@ -206,31 +155,18 @@ app.post("/api/disconnect-binance", async (req, res) => {
 
     res.json({ success: true, message: "Binance desconectado y claves eliminadas ❌" });
   } catch (err) {
-    console.error("❌ Error en /disconnect-binance:", err);
     res.status(500).json({ success: false, error: err.message });
   }
 });
 
-// === Boot: reinicia streams previos ===
-async function startAllUserStreamsOnBoot() {
-  const qSnap = await db.collection("users").where("binanceConnected", "==", true).get();
-  qSnap.forEach((docSnap) => {
-    const d = docSnap.data();
-    if (!d.binanceApiKey || !d.binanceApiSecret) return;
-    const secret = decrypt(d.binanceApiSecret);
-    startUserStream(docSnap.id, d.binanceApiKey, secret);
-  });
-}
-
 // === Health ===
 app.get("/", (req, res) => res.send("API JJXCAPITAL 🚀 online"));
 app.get("/api/health", (req, res) => {
-  res.json({ status: "ok", message: "Backend en Railway funcionando ✅" });
+  res.json({ status: "ok", message: "Backend funcionando ✅" });
 });
 
 // === Start server ===
-const PORT = process.env.PORT; // Railway asigna el puerto
+const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`🚀 Server running on ${PORT}`);
-  startAllUserStreamsOnBoot();
 });
