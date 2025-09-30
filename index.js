@@ -138,10 +138,14 @@ function stopUserStream(uid) {
 }
 
 // === Endpoints ===
-app.post("/connect-binance", async (req, res) => {
+
+// Conectar Binance
+app.post("/api/connect-binance", async (req, res) => {
   try {
     const { uid, apiKey, apiSecret } = req.body;
-    if (!uid || !apiKey || !apiSecret) return res.status(400).json({ success: false, error: "Faltan campos" });
+    if (!uid || !apiKey || !apiSecret) {
+      return res.status(400).json({ success: false, error: "Faltan campos" });
+    }
 
     await db.collection("users").doc(uid).set({
       binanceApiKey: apiKey,
@@ -157,7 +161,7 @@ app.post("/connect-binance", async (req, res) => {
   }
 });
 
-// ✅ Alias: verify-binance-keys → connect-binance
+// Alias para compatibilidad
 app.post("/api/verify-binance-keys", async (req, res) => {
   try {
     const { uid, apiKey, apiSecret } = req.body;
@@ -173,20 +177,23 @@ app.post("/api/verify-binance-keys", async (req, res) => {
     }, { merge: true });
 
     await startUserStream(uid, apiKey, apiSecret);
-
     res.json({ success: true, message: "Binance conectado y verificado ✅" });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
 });
 
-app.post("/disconnect-binance", async (req, res) => {
+// Desconectar Binance
+app.post("/api/disconnect-binance", async (req, res) => {
   try {
     const { uid } = req.body;
     if (!uid) return res.status(400).json({ success: false, error: "Falta uid" });
 
     stopUserStream(uid);
-    await db.collection("users").doc(uid).set({ binanceConnected: false, binanceDisconnectedAt: new Date() }, { merge: true });
+    await db.collection("users").doc(uid).set({
+      binanceConnected: false,
+      binanceDisconnectedAt: new Date(),
+    }, { merge: true });
 
     res.json({ success: true, message: "Binance desconectado ❌" });
   } catch (err) {
