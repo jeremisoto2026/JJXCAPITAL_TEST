@@ -142,6 +142,9 @@ function stopUserStream(uid) {
 // Conectar Binance
 app.post("/api/connect-binance", async (req, res) => {
   try {
+    // 👇 LOG PARA DEPURAR
+    console.log("📩 Body recibido en /connect-binance:", req.body);
+
     const { uid, apiKey, apiSecret } = req.body;
     if (!uid || !apiKey || !apiSecret) {
       return res.status(400).json({ success: false, error: "Faltan campos" });
@@ -164,6 +167,9 @@ app.post("/api/connect-binance", async (req, res) => {
 // Alias para compatibilidad
 app.post("/api/verify-binance-keys", async (req, res) => {
   try {
+    // 👇 LOG PARA DEPURAR
+    console.log("📩 Body recibido en /verify-binance-keys:", req.body);
+
     const { uid, apiKey, apiSecret } = req.body;
     if (!uid || !apiKey || !apiSecret) {
       return res.status(400).json({ success: false, error: "Faltan uid, apiKey o apiSecret" });
@@ -186,6 +192,8 @@ app.post("/api/verify-binance-keys", async (req, res) => {
 // Desconectar Binance
 app.post("/api/disconnect-binance", async (req, res) => {
   try {
+    console.log("📩 Body recibido en /disconnect-binance:", req.body);
+
     const { uid } = req.body;
     if (!uid) return res.status(400).json({ success: false, error: "Falta uid" });
 
